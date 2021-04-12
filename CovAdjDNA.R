@@ -1,3 +1,5 @@
+#!/usr/local/bin/Rscript
+
 library(gglasso)
 library(expm)
 
@@ -21,6 +23,10 @@ InteractionMatrix <- function(X, W) {
   XW <- sweep(W.new, 1, X[,1], `*`)
   for(j in 2:p) {
     XW <- cbind(XW, sweep(W.new, 1, X[,j], `*`))
+  }
+  # ensure XW is mean zero
+  for(k in 1:ncol(XW)) {
+    XW[,k] <- XW[,k] - rep(mean(XW[,k]), n)
   }
   
   return(XW)
@@ -48,13 +54,29 @@ EstAlpha <- function(X, W, j, nfolds = 10) {
   opt.est <- cv.fit$gglasso.fit$beta[,which(cv.fit$lambda == opt.lam)] /
              XW.scale[-J] # return estimates to original scale
   
-  sigma2.hat <- sum((X.cent[,j] - (XW[,-J] %*% opt.est))^2)/(n - sum(opt.est != 0))
+  # sigma2.hat <- abs(sum((X.cent[,j] - (XW[,-J] %*% opt.est))^2)/(n - sum(opt.est != 0)))
+  # sigma2.hat <- abs(sum((X.cent[,j] - (XW[,-J] %*% opt.est))^2)/(n - sum(opt.est != 0)/(q+1)))
+  
+  # estimate degrees of freedom (Breheney & Huang, 2009)
+  part.est <- numeric(length(opt.est))
+  for(l in 1:ncol(XW[,-J])){
+    if(opt.est[l] != 0) {
+      part.resid <- X.cent[,j] -  (XW[,-J])[,-l] %*% opt.est[-l]
+      part.est[l] <- sum(part.resid * XW[,l])/sum(XW[,l]^2)
+    }
+  }
+  df.hat <- sum((opt.est/part.est)[opt.est != 0])
+  sigma2.hat <- abs(sum((X.cent[,j] - (XW[,-J] %*% opt.est))^2)/(n - df.hat))
+  
+  
   out <- list(alpha.hat = opt.est,
-              sigma2.hat = sigma2.hat)
+              sigma2.hat = sigma2.hat,
+              df.hat = df.hat)
+  
   return(out)
 }
 
-EstGamma <- function(X, W, j, k, nfolds = 5) {
+EstGamma <- function(X, W, j, k, nfolds = 10) {
   # input X: n by p matrix of gene expression levels
   # input W: n by q matrix of confounding variables (No intercept!)
   # input j: index of which gene (column of X) is response vector
@@ -77,7 +99,7 @@ EstGamma <- function(X, W, j, k, nfolds = 5) {
     cv.fit <- cv.gglasso(x = XW[,-c(J,K)] %*% diag(1/XW.scale[-c(J,K)]), y = XW[,K[t]],
                          nfolds = nfolds, group = rep(1:(p-2), each = q + 1),
                          intercept = FALSE)
-    opt.lam <- cv.fit$lambda.min
+    opt.lam <- cv.fit$lambda.1se#cv.fit$lambda.min
     opt.est <- cv.fit$gglasso.fit$beta[, which(cv.fit$lambda == opt.lam)] /
                XW.scale[-c(J, K)]
     
@@ -120,12 +142,24 @@ DebiasAlpha <- function(X, W, alpha.hat, Gamma.hat, sigma2.hat, j, k) {
   alpha.check <- alpha.hat.jk + bias
   
   ### Compute asymptotic variance of debiased estimate
-  Omega <- solve(sqrtm(t(XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)) %*%
-                        (XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)))) %*%
-           t(XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)) %*% XW[,K]
-  Omega.inv <- solve(Omega)
+  # Omega <- solve(sqrtm(t(XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)) %*%
+  #                       (XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)))) %*%
+  #          t(XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)) %*% XW[,K]
+  # Omega.inv <- solve(Omega)
+  # 
+  # var.est <- sigma2.hat * Omega.inv %*% t(Omega.inv)
   
-  var.est <- sigma2.hat * Omega.inv %*% t(Omega.inv)
+  # var.est <- solve(t(XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)) %*% XW[,K]) %*% 
+  #            t(XW[,K] - XW[,-c(J,K)] %*% Gamma.hat) %*%
+  #            diag(c((X.cent[,j] - XW[,-J] %*% alpha.hat)^2)) %*%
+  #            (XW[,K] - XW[,-c(J,K)] %*% Gamma.hat) %*%
+  #            solve(t(XW[,K]) %*% (XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)))
+  
+  var.est <- solve(t(XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat)) %*% XW[,K]) %*% 
+             t(XW[,K] - XW[,-c(J,K)] %*% Gamma.hat) %*%
+             (XW[,K] - XW[,-c(J,K)] %*% Gamma.hat) %*%
+             solve(t(XW[,K]) %*% (XW[,K] - (XW[,-c(J,K)] %*% Gamma.hat))) *
+             sigma2.hat
   
   ### return output
   out <- list(alpha.check = alpha.check,
@@ -134,7 +168,7 @@ DebiasAlpha <- function(X, W, alpha.hat, Gamma.hat, sigma2.hat, j, k) {
   return(out)
 }
 
-NeighborhoodInference <- function(X, W, j, nfolds = 5) {
+NeighborhoodInference <- function(X, W, j, nfolds = 10) {
   # input X: n by p matrix of gene expression levels
   # input W: n by q matrix of confounding variables (No intercept!)
   # input j: index of which gene (column of X) is response vector
@@ -155,7 +189,7 @@ NeighborhoodInference <- function(X, W, j, nfolds = 5) {
   ks <- (1:p)[-j]
   for(t in 1:(p - 1)) {
     k <- ks[t]
-    Gamma.hat <- EstGamma(X, W, j, k)
+    Gamma.hat <- EstGamma(X, W, j, k, nfolds = nfolds)
     debias.grpLassoEst <- DebiasAlpha(X, W, alpha.hat, Gamma.hat, sigma2.hat, j, k)
     alpha.check.j[t,] <- debias.grpLassoEst$alpha.check
     var.est.j[t,,] <- debias.grpLassoEst$var.est
@@ -178,7 +212,7 @@ NeighborhoodInference <- function(X, W, j, nfolds = 5) {
   return(out)
 }
 
-FullNetworkInference <- function(X, W, nfolds = 5) {
+FullNetworkInference <- function(X, W, nfolds = 10) {
   # input X: n by p matrix of gene expression levels
   # input W: n by q matrix of confounding variables (No intercept!)
   n <- nrow(X)
@@ -238,26 +272,39 @@ ConfAdjDiffNetwork <- function(NetInf1, NetInf2) {
 ### TOY EXAMPLE
 ############################################################
 
-library(mvtnorm)
+# library(mvtnorm)
 
-set.seed(206)
-n <- 40
-p <- 5
-q <- 1
+# set.seed(1122)
+# n <- 40
+# p <- 3
+# q <- 2
+# 
+# Sigma.1 <- matrix(0, p, p)
+# diag(Sigma.1) <- 1
+# Omega.2 <- matrix(0, p, p)
+# diag(Omega.2) <- 1
+# Sigma.2 <- solve(Omega.2)
+# 
+# X.1 <- rmvnorm(n, rep(0,p), Sigma.1)
+# W.1 <- rmvnorm(n, rep(0,q), diag(q))
+# 
+# X.2 <- rmvnorm(n, rep(0, p), Sigma.2)
+# W.2 <- rmvnorm(n, rep(0, q), diag(q))
+# 
+# out.1 <- FullNetworkInference(X.1, W.1)
+# out.2 <- FullNetworkInference(X.2, W.2)
+# out <- ConfAdjDiffNetwork(out.1, out.2)
+# 
+# n <- 250
+# p <- 40
+# q <- 2
+# X <- rmvnorm(n, rep(0, p-1), diag(p-1))
+# # W <- cbind(runif(n), runif(n))
+# W <- rmvnorm(n, rep(0, 2), diag(2))
+# X.p <- X[,1] + X[,1] * W[,1] + X[,2] + X[,2] * W[,2] +
+#        X[,1] * W[,2] + X[,2] * W[,1] + rnorm(n, mean = 0, sd = 1.5)
+# X <- cbind(X, X.p)
+# asdf <- EstAlpha(X = X, W = W, j = p, nfolds = 10)
 
-Sigma.1 <- matrix(0, p, p)
-diag(Sigma.1) <- 1
-Omega.2 <- matrix(0, p, p)
-diag(Omega.2) <- 1
-Sigma.2 <- solve(Omega.2)
 
-X.1 <- rmvnorm(n, rep(0,p), Sigma.1)
-W.1 <- rmvnorm(n, rep(0,q), diag(q))
-
-X.2 <- rmvnorm(n, rep(0, p), Sigma.2)
-W.2 <- rmvnorm(n, rep(0, q), diag(q))
-
-out.1 <- FullNetworkInference(X.1, W.1)
-out.2 <- FullNetworkInference(X.2, W.2)
-out <- ConfAdjDiffNetwork(out.1, out.2)
 
