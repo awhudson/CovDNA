@@ -1,5 +1,3 @@
-#!/usr/local/bin/Rscript
-
 library(gglasso)
 library(expm)
 
